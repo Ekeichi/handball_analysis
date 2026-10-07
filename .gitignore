@@ -1,0 +1,17 @@
+*.plt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# macOS
+.DS_Store
+
+# Large or generated files (models are > 100 MB, GitHub refuses them)
+models/
+*.pt
+input_videos/
+output_videos/
+stubs/
+runs/
