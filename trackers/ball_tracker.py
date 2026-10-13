@@ -113,15 +113,28 @@ class BallTracker:
 
         return ball_positions
     
-    def interpolate_ball_positions(self, ball_positions):
-        ball_positions = [x.get(1,{}).get("bbox", []) for x in ball_positions]
-        df_ball_positions = pd.DataFrame(ball_positions, columns=["x1", "y1", "x2", "y2"])
+    def interpolate_ball_positions(self, ball_positions, max_gap=30):
+        # max_gap=30 frames is half a second at 60 fps: beyond that a straight line between
+        # the two detections no longer says where the ball really was, so the gap stays empty
+        bboxes = [x.get(1, {}).get("bbox", []) for x in ball_positions]
+        bboxes = [bbox if len(bbox) > 0 else [np.nan] * 4 for bbox in bboxes]
+        df_ball_positions = pd.DataFrame(bboxes, columns=["x1", "y1", "x2", "y2"])
 
-        #interpolation func for missing value
-        df_ball_positions = df_ball_positions.interpolate()
-        df_ball_positions = df_ball_positions.bfill()
+        # Length of the gap each missing frame belongs to (each gap starts right after a detection)
+        detected = df_ball_positions["x1"].notna()
+        gap_length = (~detected).groupby(detected.cumsum()).transform("sum")
 
-        ball_positions = [{1:{"bbox":x}} for x in df_ball_positions.to_numpy().tolist()]
+        # limit_area="inside": only fill between two detections, never before the first or after the last one
+        df_ball_positions = df_ball_positions.interpolate(limit_area="inside")
+        df_ball_positions[~detected & (gap_length > max_gap)] = np.nan
+
+        ball_positions = []
+        for bbox, is_detected in zip(df_ball_positions.to_numpy().tolist(), detected):
+            if np.isnan(bbox[0]):
+                ball_positions.append({})
+            else:
+                # Flag filled positions: they are a guess, so the possession detector trusts them less
+                ball_positions.append({1: {"bbox": bbox, "interpolated": not is_detected}})
         return ball_positions
         
                 

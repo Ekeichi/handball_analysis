@@ -5,8 +5,16 @@ from utils import measure_distance, get_center_of_bbox
 class BallAcquisitionDetector:
     def __init__(self):
         self.position_threshold = 50
-        self.min_frames = 11
+        self.min_frames = 7
         self.containment_threshold = 0.8
+        # Frames without candidate tolerated before the current streak is dropped (occlusion, missed detection)
+        self.max_missed_frames = 4
+        # Frames the confirmed holder keeps the ball without being seen (ball in flight, out of play)
+        self.max_holder_absence = 25
+        # Ball speed (px/frame) relative to the candidate's bbox height above which the ball is in flight, not held
+        self.max_ball_speed_ratio = 0.25
+        # Relative height in the candidate's bbox (0 = head, 1 = feet) below which the ball is at leg level
+        self.low_ball_ratio = 0.6
 
     def get_key_player_assignments_points(self, player_bbox, ball_center):
         ball_center_x = ball_center[0]
@@ -86,34 +94,91 @@ class BallAcquisitionDetector:
         
         return -1
 
+    def get_ball_speeds(self, ball_tracks):
+        centers = []
+        for frame in ball_tracks:
+            bbox = frame.get(1, {}).get('bbox', [])
+            centers.append(get_center_of_bbox(bbox) if bbox else None)
+        speeds = [0.0] * len(centers)
+
+        for frame_num, center in enumerate(centers):
+            if center is None:
+                continue
+            # Centered difference over the neighbours to smooth the detection jitter
+            neighbours = [centers[f] for f in (frame_num - 1, frame_num + 1) if 0 <= f < len(centers) and centers[f] is not None]
+            if len(neighbours) == 2:
+                speeds[frame_num] = measure_distance(neighbours[0], neighbours[1]) / 2
+            elif len(neighbours) == 1:
+                speeds[frame_num] = measure_distance(neighbours[0], center)
+
+        return speeds
+
     def detect_ball_possession(self, player_tracks, ball_tracks):
         num_frames = len(ball_tracks)
         possession_list = [-1] * num_frames
-        consecutive_possesion_count = {}
+        ball_speeds = self.get_ball_speeds(ball_tracks)
+
+        current_holder = -1
+        holder_last_seen = -1
+        candidate = -1
+        candidate_start = -1
+        candidate_count = 0
+        missed_frames = 0
 
         for frame_num in range(num_frames):
+            # No ball detected and no player close enough are handled the same way: no candidate
+            best_player_id = -1
             ball_info = ball_tracks[frame_num].get(1, {})
-            if not ball_info:
-                continue
-
             ball_bbox = ball_info.get('bbox', [])
-            if not ball_bbox:
-                continue
-
-            ball_center = get_center_of_bbox(ball_bbox)
-
-            best_player_id = self.find_best_candidate_for_possession(ball_center, player_tracks[frame_num], ball_bbox)
+            if ball_bbox:
+                ball_center = get_center_of_bbox(ball_bbox)
+                best_player_id = self.find_best_candidate_for_possession(ball_center, player_tracks[frame_num], ball_bbox)
 
             if best_player_id != -1:
-                number_of_consecutive_frames = consecutive_possesion_count.get(best_player_id, 0) + 1
-                # Keep only the current candidate's count, so a player switch restarts the confirmation
-                consecutive_possesion_count = {best_player_id: number_of_consecutive_frames}
+                _, y1, _, y2 = player_tracks[frame_num][best_player_id]['bbox']
+                height = y2 - y1
 
-                if number_of_consecutive_frames >= self.min_frames:
-                    possession_list[frame_num] = best_player_id
+                # A fast ball is a pass or a shot going past the player, nobody holds it
+                if ball_speeds[frame_num] > self.max_ball_speed_ratio * height:
+                    best_player_id = -1
 
+                # A guessed position or a ball at leg level (bounce pass, ball rolling past) is a weak clue:
+                # it can extend the current candidate or holder (dribble) but not start a new possession
+                elif best_player_id not in (candidate, current_holder):
+                    is_low_ball = (ball_center[1] - y1) > self.low_ball_ratio * height
+                    if ball_info.get('interpolated', False) or is_low_ball:
+                        best_player_id = -1
+
+            if best_player_id == -1:
+                missed_frames += 1
+                if missed_frames > self.max_missed_frames:
+                    candidate = -1
+                    candidate_count = 0
+            elif best_player_id == candidate:
+                candidate_count += 1
+                missed_frames = 0
             else:
-                consecutive_possesion_count = {}
+                # A player switch restarts the confirmation
+                candidate = best_player_id
+                candidate_start = frame_num
+                candidate_count = 1
+                missed_frames = 0
+
+            if best_player_id != -1 and best_player_id == current_holder:
+                holder_last_seen = frame_num
+
+            if candidate_count == self.min_frames:
+                current_holder = candidate
+                holder_last_seen = frame_num
+                # Backfill: the possession started at the first frame of the streak, not when it got confirmed
+                for f in range(candidate_start, frame_num):
+                    possession_list[f] = current_holder
+
+            # Hysteresis: the holder keeps the ball until another player is confirmed or they have been gone too long
+            if current_holder != -1 and frame_num - holder_last_seen > self.max_holder_absence:
+                current_holder = -1
+
+            possession_list[frame_num] = current_holder
 
         return possession_list
                 

@@ -26,15 +26,9 @@ class TeamBallControlDrawer:
 
     def draw(self, video_frames, player_assignment, ball_acquisition):
         team_ball_control = self.get_team_ball_control(player_assignment, ball_acquisition)
-        output_video_frames = []
+        # Draw in place and yield frame by frame to avoid keeping the whole video in memory
         for frame_num, frame in enumerate(video_frames):
-            if frame_num == 0:
-                continue
-            
-            frame_drawn = self.draw_frame(frame, frame_num, team_ball_control)
-            output_video_frames.append(frame_drawn)
-
-        return output_video_frames
+            yield self.draw_frame(frame, frame_num, team_ball_control)
 
     def draw_frame(self, frame, frame_num, team_ball_control):
         overlay = frame.copy()
@@ -63,8 +57,8 @@ class TeamBallControlDrawer:
         team_2_num_frames = team_ball_control_till_frame[team_ball_control_till_frame==2].shape[0]
         
         total = team_1_num_frames + team_2_num_frames
-        team_1 = team_1_num_frames / total if total > 0 else 0.0
-        team_2 = team_2_num_frames / total if total > 0 else 0.0
+        team_1 = 100 * team_1_num_frames / total if total > 0 else 0.0
+        team_2 = 100 * team_2_num_frames / total if total > 0 else 0.0
         
         cv2.putText(frame, f"Team 1 ball control: {team_1:.2f}%", (text_x, text_y1), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), font_thickness)
         cv2.putText(frame, f"Team 2 ball control: {team_2:.2f}%", (text_x, text_y2), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), font_thickness)
